@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
 
-const ORCHESTRATOR_TOOLS = ['bot_list', 'task_create', 'task_list', 'task_get', 'task_update', 'task_assign', 'task_dispatch', 'task_comment']
+const ORCHESTRATOR_TOOLS = ['bot_list', 'task_create', 'task_list', 'task_get', 'task_update', 'task_assign', 'task_dispatch', 'task_new_session', 'task_comment']
 const WORKER_TOOLS = ['task_get', 'task_comment', 'task_complete', 'task_block', 'session_list', 'session_get']
 
-const WORKER_DENY = ['task_create', 'task_assign', 'task_dispatch', 'task_update', 'bot_list', 'bot_create', 'bot_update']
+const WORKER_DENY = ['task_create', 'task_assign', 'task_dispatch', 'task_update', 'task_new_session', 'bot_list', 'bot_create', 'bot_update']
 const ORCHESTRATOR_DENY = ['session_list', 'session_get']
 
 const ROLE_ORCHESTRATOR = `你是这台 DSH 里的**主控 bot**（私人助理）。用户大多数时候只跟你说话。
@@ -16,7 +16,9 @@ const ROLE_ORCHESTRATOR = `你是这台 DSH 里的**主控 bot**（私人助理�
 5. 用户问「进展如何」时用 task_list 读真实状态，不要凭印象汇报；被验收通过的任务再说「完成」。
 6. 任务完成会以系统消息通知你，你需要**按用户视角汇总**：做了什么、现在能验证什么、有什么没做到、下一步建议。
 
-关于你手上的工具：task_create / task_list / task_get / task_update / task_assign / task_dispatch / task_comment / bot_list。`
+关于你手上的工具：task_create / task_list / task_get / task_update / task_assign / task_dispatch / task_new_session / task_comment / bot_list。
+
+任务执行会话默认拥有**完全权限**（无人值守，不会弹审批）。每个任务会绑定到它自己的 workspace；如果任务换了 workspace 而旧会话还在旧目录里，用 task_new_session 为它新建一个会话，旧会话会被解绑作废，任务本身与评论都保留。`
 
 const ROLE_WORKER = `你是这台 DSH 里的一个**执行 bot**，通过任务板接活。用户不直接跟你对话，你看到的每条任务消息都来自任务板。
 
@@ -153,8 +155,9 @@ export function createService({ ctx, store, log }) {
   }
 
   // Bot sessions run unattended: a pending approval has no human to click it, so
-  // the turn would hang forever. Policy "never" fails closed deterministically and
-  // lets the model see a rejection it can work around (or task_block about).
+  // the turn would hang forever. Task sessions therefore default to the profile's
+  // full-access preset (danger-full-access sandbox + never approval): the bot can
+  // edit files in its workspace without a prompt it could never get answered.
   function approvalService() {
     try {
       return ctx.get('approval', false)
@@ -173,6 +176,39 @@ export function createService({ ctx, store, log }) {
       log('dsh-bots: approval setPolicy failed', error)
       return false
     }
+  }
+
+  function permissionPresetService() {
+    try {
+      const presets = ctx.get('permissionPresets', false)
+      return presets && typeof presets.set === 'function' ? presets : null
+    } catch {
+      return null
+    }
+  }
+
+  // "Full access" is one durable event that flips both knobs (sandbox mode and
+  // approval policy). Prefer the profile preset so the session behaves exactly
+  // like the user's own full-access chats; fall back to approval "never" when the
+  // preset service is not composed (older hosts, tests).
+  function grantFullAccess(agent) {
+    if (!agent) return 'none'
+    const session = agent.session
+    const presets = permissionPresetService()
+    if (presets && session && typeof session === 'object' && session.id) {
+      try {
+        presets.set(session, 'danger-full-access')
+        trace(`full-access preset for ${sessionIdOfAgent(agent)}`)
+        return 'danger-full-access'
+      } catch (error) {
+        trace(`full-access preset failed: ${error && error.message ? error.message : error}`)
+      }
+    }
+    if (relaxApproval(agent)) {
+      trace(`approval never (full-access fallback) for ${sessionIdOfAgent(agent)}`)
+      return 'never'
+    }
+    return 'none'
   }
 
   function liveCwd() {
@@ -396,7 +432,7 @@ export function createService({ ctx, store, log }) {
       }
     }
     trace('attach ' + sessionId + ' -> ' + bot.id + ' (' + (bot.isOrchestrator ? 'orchestrator' : 'worker') + ')')
-    relaxApproval(agent)
+    grantFullAccess(agent)
     const text = botPrompt(bot)
     const disposePersona = applyPersona(agent, text)
     const disposeRoster = bot.isOrchestrator ? applyRoster(agent, bot) : () => {}
@@ -571,7 +607,7 @@ export function createService({ ctx, store, log }) {
       agent = result && result.agent ? result.agent : result
       if (!agent) throw new Error('failed to create agent')
     }
-    relaxApproval(agent)
+    grantFullAccess(agent)
     if (botId) {
       await store.bindSession({ sessionId, botId, kind: taskId ? 'task' : 'private', taskId: taskId || null, workspaceId: await normalizeWorkspace(workspaceId) })
       // The persona/tool guard attach ran on agent creation, before this binding
@@ -751,31 +787,124 @@ export function createService({ ctx, store, log }) {
     }
   }
 
+  // A task session must live in the task's workspace. A bare workspace id is not
+  // enough: the session has to be started with a cwd, so map the id back to the
+  // path the host registered for it.
+  async function workspacePathFor(workspaceId) {
+    const id = await normalizeWorkspace(workspaceId)
+    if (!id) return null
+    const all = await listWorkspaces()
+    const hit = (Array.isArray(all) ? all : []).find((item) => item && String(item.id) === id)
+    return hit && hit.path ? String(hit.path) : null
+  }
+
+  // Replace a task's session instead of silently reusing the wrong one: the old
+  // conversation is abandoned (unbound, so it stops posing as this task's chat)
+  // and a fresh session is created in the requested workspace.
+  async function rebuildTaskSession(task, bot, options = {}) {
+    const wanted = await normalizeWorkspace(
+      options.workspaceId !== undefined ? options.workspaceId : task.workspaceId || bot.workspaceId,
+    )
+    const previous = task.sessionId ? String(task.sessionId) : null
+    if (previous) {
+      detach(previous)
+      await store.unbindSession(previous).catch(() => {})
+    }
+    await store.updateTask(task.id, { sessionId: null, ...(wanted ? { workspaceId: wanted } : {}) })
+    const created = await ensureSession({
+      botId: bot.id,
+      taskId: task.id,
+      workspacePath: await workspacePathFor(wanted),
+      workspaceId: wanted,
+      title: bot.name + ' · ' + task.id,
+    })
+    await store.updateTask(task.id, { sessionId: created.sessionId })
+    await store.bindSession({ sessionId: created.sessionId, botId: bot.id, kind: 'task', taskId: task.id, workspaceId: wanted })
+    if (previous) {
+      await store
+        .addComment(task.id, 'system', `已新建执行会话 ${created.sessionId}（替换旧会话 ${previous}）${wanted ? `，workspace ${wanted}` : ''}`)
+        .catch(() => {})
+    }
+    trace(`task ${task.id} session -> ${created.sessionId} ws=${String(wanted)}${previous ? ` (replaced ${previous})` : ''}`)
+    return { sessionId: created.sessionId, previousSessionId: previous, workspaceId: wanted, agent: created.agent }
+  }
+
   async function ensureTaskAgent(task, bot) {
     const registry = agents()
     if (!registry) throw new Error('agents service unavailable')
+    const wantedId = await normalizeWorkspace(task.workspaceId || bot.workspaceId)
     if (task.sessionId) {
+      const binding = await store.bindingFor(task.sessionId).catch(() => null)
+      const boundId = binding && binding.workspaceId ? String(binding.workspaceId) : null
+      // The workspace was corrected after this conversation was born: keep going
+      // would edit the old directory, so rebuild in the right one.
+      if (wantedId && boundId && boundId !== wantedId) {
+        trace(`task ${task.id} session ${task.sessionId} bound to ${boundId} but wants ${wantedId}: rebuilding`)
+        const rebuilt = await rebuildTaskSession(task, bot)
+        return { agent: rebuilt.agent, sessionId: rebuilt.sessionId, rebuilt: true }
+      }
       const live = typeof registry.get === 'function' ? registry.get(task.sessionId) : null
       if (live) {
-        relaxApproval(live)
-        return { agent: live, sessionId: task.sessionId }
+        grantFullAccess(live)
+        return { agent: live, sessionId: task.sessionId, rebuilt: false }
       }
       const resumed = await resumeSession(task.sessionId)
       if (resumed) {
-        relaxApproval(resumed)
-        return { agent: resumed, sessionId: task.sessionId }
+        grantFullAccess(resumed)
+        return { agent: resumed, sessionId: task.sessionId, rebuilt: false }
+      }
+      trace(`task ${task.id} session ${task.sessionId} cannot be resumed: rebuilding`)
+      const rebuilt = await rebuildTaskSession(task, bot)
+      return { agent: rebuilt.agent, sessionId: rebuilt.sessionId, rebuilt: true }
+    }
+    const rebuilt = await rebuildTaskSession(task, bot)
+    return { agent: rebuilt.agent, sessionId: rebuilt.sessionId, rebuilt: true }
+  }
+
+  // "New session for this task" — the escape hatch when a task session is stuck
+  // in the wrong workspace, points at an unreadable log, or is simply too dirty
+  // to continue. The task, its rounds and its comments stay; only the
+  // conversation is replaced.
+  async function newTaskSession(taskId, options = {}) {
+    const task = await store.getTask(taskId)
+    if (!task) return { ok: false, error: `任务 ${taskId} 不存在` }
+    if (task.status === 'done' || task.status === 'canceled') return { ok: false, error: `任务 ${task.id} 已结束（${task.status}）` }
+    const bot = task.assignee && task.assignee.kind === 'bot' ? await store.getBot(task.assignee.id) : null
+    if (!bot) return { ok: false, error: `任务 ${task.id} 还没有指派给具体 bot；先 task_assign 再新开会话` }
+    if (task.activeRoundId) {
+      // The abandoned conversation must not keep editing the wrong directory while
+      // its replacement starts.
+      await stopRound(task.id, { reason: '为任务新建执行会话，旧会话作废' }).catch(() => {})
+    }
+    const rebuilt = await rebuildTaskSession(task, bot, { workspaceId: options.workspaceId })
+    await rebind(rebuilt.sessionId)
+    return {
+      ok: true,
+      taskId: task.id,
+      sessionId: rebuilt.sessionId,
+      previousSessionId: rebuilt.previousSessionId,
+      workspaceId: rebuilt.workspaceId,
+      botId: bot.id,
+    }
+  }
+
+  // Make the task's conversation visible/openable in this client. A session whose
+  // workspace or log belongs to another profile cannot be opened: say so instead
+  // of handing the UI an id it will fail on.
+  async function openTaskSession(taskId) {
+    const task = await store.getTask(taskId)
+    if (!task) return { ok: false, error: `任务 ${taskId} 不存在` }
+    if (!task.sessionId) return { ok: false, error: `任务 ${task.id} 还没有执行会话；先派发，或用「新开会话」建一个` }
+    const agent = await liveAgent(task.sessionId)
+    if (!agent) {
+      return {
+        ok: false,
+        sessionId: task.sessionId,
+        error: `执行会话 ${task.sessionId} 打不开（可能属于别的 workspace 或 profile）；可以用「新开会话」为它重建一个`,
       }
     }
-    const { sessionId, agent } = await ensureSession({
-      botId: bot.id,
-      taskId: task.id,
-      workspacePath: bot.workspaceId || task.workspaceId || undefined,
-      workspaceId: task.workspaceId || bot.workspaceId || null,
-      title: bot.name + ' · ' + task.id,
-    })
-    await store.updateTask(task.id, { sessionId })
-    await store.bindSession({ sessionId, botId: bot.id, kind: 'task', taskId: task.id, workspaceId: await normalizeWorkspace(task.workspaceId || bot.workspaceId) })
-    return { agent, sessionId }
+    grantFullAccess(agent)
+    return { ok: true, taskId: task.id, sessionId: task.sessionId }
   }
 
   async function finishRound(taskId, options = {}) {
@@ -964,6 +1093,11 @@ export function createService({ ctx, store, log }) {
     botForSession,
     openBotChat,
     dispatchTask,
+    newTaskSession,
+    openTaskSession,
+    workspacePathFor,
+    normalizeWorkspace,
+    grantFullAccess,
     finishRound,
     drainQueue,
     stopRound,

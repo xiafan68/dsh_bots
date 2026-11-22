@@ -373,6 +373,16 @@ export class BotsStore {
     })
   }
 
+  // A task can be moved to a new session (wrong workspace, unreadable log). The
+  // abandoned session must stop looking like a bot conversation in the UI.
+  async unbindSession(sessionId) {
+    return this.write((db) => {
+      const before = db.bindings.length
+      db.bindings = db.bindings.filter((item) => item.sessionId !== sessionId)
+      return db.bindings.length !== before
+    })
+  }
+
   // ---------------------------------------------------------------- notifications
 
   async pushNotification(entry) {

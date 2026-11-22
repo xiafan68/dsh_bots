@@ -42,7 +42,7 @@ function fmtTask(task) {
   const assignee = task.assignee ? `${task.assignee.kind}:${task.assignee.id}` : '未指派'
   const lines = [
     `${task.id}  [${task.status}]  ${task.title}`,
-    `指派 ${assignee} · 优先级 ${task.priority} · agentRequired ${task.agentRequired ? 'yes' : 'no'}${task.sessionId ? ` · 会话 ${task.sessionId}` : ''}`,
+    `指派 ${assignee} · 优先级 ${task.priority} · agentRequired ${task.agentRequired ? 'yes' : 'no'}${task.workspaceId ? ` · workspace ${task.workspaceId}` : ''}${task.sessionId ? ` · 会话 ${task.sessionId}` : ''}`,
   ]
   if (task.brief.trim()) lines.push(`说明：${task.brief.trim()}`)
   if (task.result) lines.push(`结果：${task.result}`)
@@ -153,6 +153,7 @@ export function registerTools({ ctx, store, service, log }) {
       labels: { type: 'string', description: '标签，逗号分隔' },
       status: { type: 'string', description: 'backlog / todo，默认 todo（todo 表示可以派了）' },
       notify: { type: 'string', description: '任务结束时怎么通知主控：silent（只进收件箱）/ visible（发可见通知）；留空按默认' },
+      workspace_id: { type: 'string', description: '任务绑定的 workspace（id 或绝对路径）；留空继承你当前会话所在的 workspace。执行 bot 的会话会开在这个 workspace 里' },
     },
     async run({ args, store, exec, service }) {
       let assignee = null
@@ -162,11 +163,15 @@ export function registerTools({ ctx, store, service, log }) {
         assignee = { kind: 'bot', id: bot.id }
       }
       // A task inherits the caller's workspace so its session lands in the same
-      // project instead of the profile default directory.
+      // project instead of the profile default directory; an explicit
+      // workspace_id wins so the board can retarget a task after the fact.
       let workspaceId = null
       try {
-        const cwd = service.agentCwdOf(exec && exec.agent)
-        workspaceId = await service.workspaceIdForCwd(cwd)
+        workspaceId = args.workspace_id ? await service.normalizeWorkspace(String(args.workspace_id)) : null
+        if (!workspaceId) {
+          const cwd = service.agentCwdOf(exec && exec.agent)
+          workspaceId = await service.workspaceIdForCwd(cwd)
+        }
       } catch (error) {
         workspaceId = null
       }
@@ -180,7 +185,7 @@ export function registerTools({ ctx, store, service, log }) {
         status: args.status || 'todo',
         workspaceId,
       })
-      return `已创建 ${task.id}「${task.title}」${assignee ? `，指派给 ${assignee.id}` : '，暂未指派'}。`
+      return `已创建 ${task.id}「${task.title}」${assignee ? `，指派给 ${assignee.id}` : '，暂未指派'}${workspaceId ? `，workspace ${workspaceId}` : ''}。`
     },
   })
 
@@ -230,8 +235,16 @@ export function registerTools({ ctx, store, service, log }) {
       priority: { type: 'string', description: 'low / normal / high / urgent' },
       notify: { type: 'string', description: 'silent / visible；留空恢复默认' },
       result: { type: 'string', description: '验收结论或最终结果' },
+      workspace_id: { type: 'string', description: '把任务改绑到另一个 workspace（id 或绝对路径）；留空不动。改了之后执行会话仍开在旧目录，派发时会自动重建，也可以直接 task_new_session' },
     },
-    async run({ args, store }) {
+    async run({ args, store, service }) {
+      const before = await store.getTask(args.task_id)
+      if (!before) return `没有任务 ${args.task_id}。`
+      let workspaceId
+      if (args.workspace_id) {
+        workspaceId = await service.normalizeWorkspace(String(args.workspace_id))
+        if (!workspaceId) return `没法把 workspace「${args.workspace_id}」解析成已知工作区；用 workspace 的 id 或绝对路径。`
+      }
       const task = await store.updateTask(args.task_id, {
         status: args.status,
         title: args.title,
@@ -239,9 +252,12 @@ export function registerTools({ ctx, store, service, log }) {
         priority: args.priority,
         notify: args.notify,
         result: args.result,
+        ...(workspaceId ? { workspaceId } : {}),
       })
       if (!task) return `没有任务 ${args.task_id}。`
-      return `已更新 ${task.id}：状态 ${task.status}。`
+      const moved = workspaceId && before.workspaceId !== workspaceId
+      const stale = moved && task.sessionId
+      return `已更新 ${task.id}：状态 ${task.status}${moved ? `，workspace → ${workspaceId}` : ''}。${stale ? ` 执行会话 ${task.sessionId} 还在旧 workspace；下次派发会自动重建，或现在用 task_new_session 立即重建。` : ''}`
     },
   })
 
@@ -294,6 +310,26 @@ export function registerTools({ ctx, store, service, log }) {
       const result = await service.dispatchTask(args.task_id, { byBotId: bot ? bot.id : null })
       if (!result.ok) return result.error
       return `已派发 ${result.taskId}（轮次 ${result.roundId}），会话 ${result.sessionId}。它完成后会用 task_complete 交回，你会收到通知。`
+    },
+  })
+
+  register({
+    name: 'task_new_session',
+    description:
+      '给任务换一个新的执行会话：绑错了 workspace、旧会话打不开、或旧会话已经脏到没法继续时用。旧会话会被解绑作废（正在跑的轮次会被停止），任务、评论与历史都保留；新会话开在任务的 workspace 里。换完用 task_dispatch 重新派发。',
+    roles: ['orchestrator'],
+    parameters: {
+      task_id: { type: 'string', required: true, description: '任务 id' },
+      workspace_id: { type: 'string', description: '顺便把任务改绑到哪个 workspace（id 或绝对路径）；留空用任务当前的 workspace' },
+      reason: { type: 'string', description: '为什么要换会话（会记进任务评论，方便事后追）' },
+    },
+    async run({ args, service, bot, store }) {
+      const result = await service.newTaskSession(args.task_id, { workspaceId: args.workspace_id ? String(args.workspace_id) : undefined })
+      if (!result.ok) return result.error
+      if (args.reason) {
+        await store.addComment(result.taskId, bot ? bot.id : 'orchestrator', `换会话：${String(args.reason).trim()}`).catch(() => {})
+      }
+      return `已为 ${result.taskId} 新建执行会话 ${result.sessionId}${result.workspaceId ? `（workspace ${result.workspaceId}）` : ''}${result.previousSessionId ? `，旧会话 ${result.previousSessionId} 已解绑` : ''}。用 task_dispatch 重新派发。`
     },
   })
 

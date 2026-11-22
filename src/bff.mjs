@@ -2,7 +2,7 @@ import { STATUSES, PRIORITY_LIST } from './store.mjs'
 
 export const ROUTE_PREFIX = '/dsh-bots/api'
 
-export const BUILD = 'v42-chat-matrix'
+export const BUILD = 'v43-workspace-sessions'
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload === undefined ? null : payload)
@@ -181,7 +181,7 @@ export function createApi({ ctx, store, service, log }) {
       }
 
       if (method === 'GET' && path === '/debug') {
-        const names = ['agents','tools','skills','webServer','sessionController','sessions','sessionStore','workspaces','workspaceRegistry','workingDirectory','modelCatalog','models','providers','approvals','approval','permissions','permission','policy','sandbox','settings','preferences','config','profile','agentPresets','agentPresetRegistry','systemPrompt','subagents','hooks','commands','usage','locale','sessionTitle','environment','runtime','capabilities']
+        const names = ['agents','tools','skills','webServer','sessionController','sessions','sessionStore','workspaces','workspaceRegistry','workingDirectory','modelCatalog','models','providers','approvals','approval','permissions','permission','permissionPresets','policy','sandbox','settings','preferences','config','profile','agentPresets','agentPresetRegistry','systemPrompt','subagents','hooks','commands','usage','locale','sessionTitle','environment','runtime','capabilities']
         const out = {}
         for (const name of names) {
           try {
@@ -247,6 +247,24 @@ export function createApi({ ctx, store, service, log }) {
       if (dispatchMatch && method === 'POST') {
         const result = await service.dispatchTask(dispatchMatch[1])
         if (result.ok && result.queued) return sendJson(res, 202, result)
+        return sendJson(res, result.ok ? 200 : 409, result)
+      }
+
+      // Replace a task's execution session (wrong workspace, unreadable log).
+      const sessionMatch = path.match(/^\/tasks\/([^/]+)\/session$/)
+      if (sessionMatch && method === 'POST') {
+        const body = await readBody(req)
+        const result = await service.newTaskSession(sessionMatch[1], {
+          workspaceId: body.workspaceId ? String(body.workspaceId) : undefined,
+        })
+        return sendJson(res, result.ok ? 200 : 409, result)
+      }
+
+      // "Jump to the task's conversation": the client needs the host to confirm
+      // the session is openable before it hands the id to openSession().
+      const openSessionMatch = path.match(/^\/tasks\/([^/]+)\/open-session$/)
+      if (openSessionMatch && method === 'POST') {
+        const result = await service.openTaskSession(openSessionMatch[1])
         return sendJson(res, result.ok ? 200 : 409, result)
       }
 

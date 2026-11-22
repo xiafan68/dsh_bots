@@ -70,3 +70,14 @@ Host 侧不 import 任何 `@deepseek-ai/dsh-*` 包：需要 `defineTool` 时 `ct
 - 技能白名单真正收口：`skills` 的 per-agent 过滤目前没有官方窄口，需要 `${bot.skills}` 变量 + 提示词，或在 `skill` 工具上做 guard。
 - 排队（ADR-0004 语义）：当前忙时直接 409，可以加每任务一条的队列。
 - 验收闭环：主控 `task_update status=done` 目前不校验证据字段，可以要求 evidence 非空。
+
+## v2（v43）：workspace 归属、会话跳转、全权限
+
+数据里 `task.workspaceId` / `binding.workspaceId` 一直存在，v2 才把它们真正接通。
+
+- **workspace 指派**：新建任务与任务详情都能选 workspace（`GET /state` 里的 `workspaces` 由 `workspaceRegistry.list()` 提供）；`dispatchTask` 遇到没有 workspace 的任务会 adopt bot 的 workspace。任务会话用 `workspacePathFor(workspaceId)` 把 id 反查成路径再建——只传 id 不够，`agents.create` 要的是 cwd。
+- **改绑后自动重建**：`ensureTaskAgent` 先比较 `binding.workspaceId` 与「任务 workspace（或 bot workspace）」，不一致就 `rebuildTaskSession`：detach → `unbindSession` → 清 `task.sessionId` → `ensureSession` → 回写 `sessionId` → `bindSession`，并在任务里留一条 system 评论。所以「先派发、再改 workspace、再派发」不会继续在旧目录里跑。
+- **跳转会话**：BFF 新增 `POST /tasks/:id/open-session`（用 `liveAgent` 确认这段会话在当前宿主确实能打开，再把 id 交给客户端的 `openAnnouncedSession`）与 `POST /tasks/:id/session`（= 新开会话）。客户端在任务详情里显示 sessionId 与「打开会话 / 新开会话」两个按钮；打不开时说明原因（通常是会话属于别的 workspace / profile）。
+- **工具**：主控新增 `task_new_session`（`task_id` / `workspace_id` / `reason`）；`task_update` 增加 `workspace_id`。改绑只改数据，下一次派发触发重建（也可以立刻 `task_new_session`）。
+- **权限**：`grantFullAccess` 优先 `ctx.permissionPresets.set(session, 'danger-full-access')`——一次把 sandbox 与 approval 两个旋钮都切过去；宿主的 `permissionPresets` 服务不存在时才退回 `approval.setPolicy(agent, 'never')`。
+- **测试**：`tests/store.test.mjs` 覆盖 workspace 改绑、`unbindSession`、会话回写；`npm test` 串跑决策表与存储层。`BUILD` 升到 `v43-workspace-sessions`，可用 `/dsh-bots/api/state` 确认宿主已换代码。

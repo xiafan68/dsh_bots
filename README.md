@@ -18,7 +18,11 @@ Bots + 共享任务看板，作为 DSH 插件安装在侧栏。人可以直接�
 - Bot 管理：名字、线性图标（12 个内置）、额外 system prompt、用户级技能白名单、主控标记。全局最多一个主控。
 - **旧会话的边界**：如果某个 bot 的历史会话属于当前实例里不存在的工作区，点「私聊」会打开一个空的中转视图（DSH 找不到归属工作区时的默认态），不会自动新建——数据一致性优先，删掉该 bot 的会话或重建即可。
 - **私聊复用**（v30）：一个 bot 只有一个私聊会话。点「私聊」先问宿主有没有，有就直接打开，没有才新建；重复点击不会再产生新会话。
-- **回归用例**：`npm test`（决策表 4 条）、`npm run test:api`（真实宿主 8 条）、`npm run test:matrix`（场景矩阵 25 条检查）。
+- **回归用例**：`npm test`（决策表 4 条 + 存储层 3 条）、`npm run test:api`（真实宿主 8 条）、`npm run test:matrix`（场景矩阵 25 条检查）。
+- **任务指派 workspace（v43）**：新建与任务详情里都能选 workspace；任务会话就建在该 workspace 下，执行 bot 改的是那个项目，而不是宿主默认目录。任务卡片上直接显示所属 workspace。
+- **执行会话可见、可跳转（v43）**：任务详情里有「执行会话」一行，显示会话 id，并提供「打开会话」直接跳到那段对话；点不开（会话属于别的 workspace/profile、日志不可读）时给出原因，而不是静默失败。
+- **任务默认完全权限（v43）**：任务会话创建时按 `danger-full-access` 预设放行（沙箱不拦文件写入、审批不再打断），执行 bot 不会因为卡在「请求批准」而停住；宿主没有该预设时退回 `approval: never`。
+- **主控可换会话（v43）**：主控有 `task_new_session`（任务详情里是「新开会话」）。workspace 改错了、旧会话打不开、或会话已经脏了，就换一个新的执行会话——旧会话解绑作废，任务、轮次与评论都保留；改完 workspace 再派发时也会自动重建会话，不会继续用旧目录。
 - **会话标题与归属**（v21）：私聊会话的标题就是 bot 名，任务会话是「bot 名 · 任务号」；两者都带 bot 图标，绑定记录里写明所属 workspace，会话本身也建在该 workspace 下。
 - **私聊固定一个对话（v35）**：每个 bot 的私聊由宿主创建并记录，点多少次都回到同一个会话；卡片的「重置」（右侧栏是「↺」）会新开一个私有对话，旧对话仍留在会话列表里。宿主创建的会话会广播给界面，因此不会再出现「点私聊弹回选择工作区」。
 - 私聊：点「私聊」为该 bot 创建（或复用）一个固定会话，并直接打开；主控首次打开时补发积压通知。
@@ -27,7 +31,7 @@ Bots + 共享任务看板，作为 DSH 插件安装在侧栏。人可以直接�
 - 任务看板五列：等你（待验收 + 受阻）、处理中、等待认领、已完成、待立项。窄窗口横向滚动，宽屏等分。
 - 任务全文按「背景 / 目标 / 验收标准 / 相关位置 / 禁止事项」写，派发时原样投给执行 bot 的会话。
 - 角色工具集（按会话 → bot 绑定判定，工具内部二次校验）：
-  - 主控：`bot_list / bot_create / task_create / task_list / task_get / task_update / task_assign / task_dispatch / task_comment / task_complete / task_block / session_list / session_get`
+  - 主控：`bot_list / bot_create / task_create / task_list / task_get / task_update / task_assign / task_dispatch / task_new_session / task_comment / task_complete / task_block / session_list / session_get`
   - 执行 bot：`task_get / task_comment / task_complete / task_block / session_list / session_get`
 - 完成闭环：执行 bot 调 `task_complete`（强制写证据）→ 任务进入待验收 → **事件只落库、不发消息**（不唤醒、不改系统提示）→ 主控下次运行时用 `inbox_list` 拉取并决定要不要汇报 → 验收 `status=done` 或打回。每个任务可在详情里选「结束通知：默认 / 静默 / 可见」，选「可见」才把通知发进主控私聊；受阻与轮次异常永远发可见通知。
 - 技能白名单（v17）：bot 的「技能」字段是用户级白名单，项目 workspace 自带的技能自动放行；超出集合的 `skill` 调用会被工具层拒绝。
