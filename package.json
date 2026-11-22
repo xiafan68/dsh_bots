@@ -1,0 +1,60 @@
+{
+  "name": "@dsh-external/dsh-bots",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bots and a shared human/agent task board for DSH: create bots with their own persona and skills, give them private chats, assign tasks on a kanban board and let an orchestrator bot dispatch and report. Bot 与任务看板：给 bot 配人格与技能，私聊派活，主控 bot 分派与汇报。",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "bots",
+    "agents",
+    "kanban",
+    "taskboard",
+    "orchestrator",
+    "机器人",
+    "任务看板"
+  ],
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "locale/*.json",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node tests/chat-flow.test.mjs",
+    "test:api": "node tests/e2e-chat-api.mjs",
+    "test:ui": "node tests/e2e-ui-chat.mjs",
+    "test:matrix": "node tests/e2e-chat-matrix.mjs"
+  }
+}

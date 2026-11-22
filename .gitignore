@@ -1,0 +1,17 @@
+# 依赖
+node_modules/
+
+# 本地测试产物与浏览器 profile（体积很大，绝不提交）
+tmp/
+out/
+
+# 日志与系统文件
+*.log
+.DS_Store
+Thumbs.db
+
+# Blender 备份
+*.blend1
+
+# 本机需求笔记：属于其他项目，不是本插件的文档
+docs/T-0024-*.md

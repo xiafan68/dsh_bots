@@ -1,0 +1,5 @@
+- insert:
+    - id: dsh-bots
+      name: '@dsh-external/dsh-bots'
+      config:
+        storageDir: ''

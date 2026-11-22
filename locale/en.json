@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Bots & Task Board",
+    "description": "Reusable bots (persona + skills) and a shared human/agent task board in the sidebar: chat with a bot to delegate, create and assign tasks on the same board, and let an orchestrator bot dispatch work and report back."
+  }
+}
