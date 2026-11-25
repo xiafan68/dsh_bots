@@ -1,15 +1,16 @@
 // The orchestrator prompt must carry a live workspace list: task_create
 // inherits the caller's workspace, so naming another one has to be a decision
-// the model can actually make. The list is a rendered prompt section (not a
-// chat message), so these tests assert on the registered section/variable.
+// the model can actually make. The list is registered as runtime context (a
+// snapshot appended after retained history, so a change never invalidates the
+// cached prefix) rather than a prompt section or a chat message.
 import assert from 'node:assert/strict'
 import { createService } from '../src/service.mjs'
 
-const ROSTER_SECTION = 'dsh-bots:orchestrator-roster'
-const WORKSPACE_SECTION = 'dsh-bots:orchestrator-workspaces'
+const ROSTER_CONTEXT = 'dsh-bots:orchestrator-roster'
+const WORKSPACE_CONTEXT = 'dsh-bots:orchestrator-workspaces'
 
 function harness({ workspaces, botWorkspaceId = 'ws-a' } = {}) {
-  const sections = []
+  const contexts = []
   const variables = new Map()
   const registry = {
     list: () => workspaces,
@@ -24,8 +25,8 @@ function harness({ workspaces, botWorkspaceId = 'ws-a' } = {}) {
             variables.set(name, provider)
             return () => {}
           },
-          section(section) {
-            sections.push(section)
+          context(context) {
+            contexts.push(context)
             return () => {}
           },
         }
@@ -48,7 +49,7 @@ function harness({ workspaces, botWorkspaceId = 'ws-a' } = {}) {
   }
   const service = createService({ ctx, store, log: () => {} })
   const agent = { session: { id: 'session-1', append() {} }, ctx, inject() {} }
-  return { service, agent, sections, variables }
+  return { service, agent, contexts, variables }
 }
 
 const WORKSPACES = [
@@ -56,12 +57,18 @@ const WORKSPACES = [
   { workspaceId: 'ws-b', header: { path: 'D:/codes/beta' } },
 ]
 
-const { service, agent, sections, variables } = harness({ workspaces: WORKSPACES })
+const { service, agent, contexts, variables } = harness({ workspaces: WORKSPACES })
 await service.attach(agent)
 
-const workspaceSection = sections.find((section) => section.name === WORKSPACE_SECTION)
-assert.ok(workspaceSection, 'workspace section should be registered for the orchestrator')
-assert.match(workspaceSection.text, /\{\{dsh_bots_workspaces\}\}/, 'section must reference its variable')
+const rosterContext = contexts.find((item) => item.name === ROSTER_CONTEXT)
+assert.ok(rosterContext, 'the bot roster should be registered as runtime context')
+assert.equal(rosterContext.required, true, 'the roster must survive optional-context suppression')
+assert.match(rosterContext.text, /\{\{dsh_bots_roster\}\}/, 'roster context must reference its variable')
+
+const workspaceContext = contexts.find((item) => item.name === WORKSPACE_CONTEXT)
+assert.ok(workspaceContext, 'workspace context should be registered for the orchestrator')
+assert.equal(workspaceContext.required, true, 'the workspace list must survive optional-context suppression')
+assert.match(workspaceContext.text, /\{\{dsh_bots_workspaces\}\}/, 'context must reference its variable')
 
 const render = variables.get('dsh_bots_workspaces')
 assert.ok(render, 'workspace variable should be registered')
@@ -87,6 +94,6 @@ const missing = createService({
 })
 assert.equal(typeof missing.attach, 'function')
 
-console.log('roster: PASS workspace list is rendered as a prompt section')
+console.log('roster: PASS bot roster and workspace list are runtime contexts')
 console.log('roster: PASS ids, paths, default and own-workspace markers are present')
 console.log('roster: PASS empty or missing workspace registry degrades gracefully')

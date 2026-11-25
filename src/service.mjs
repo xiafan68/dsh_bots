@@ -277,10 +277,10 @@ export function createService({ ctx, store, log }) {
     }
   }
 
-  // The orchestrator always needs to know who it can hand work to. The roster
-  // is a prompt section at the very end of the system prompt, refreshed on
-  // every model step through a system-prompt variable, so bots created or
-  // deleted mid-session show up without a restart.
+  // The orchestrator always needs to know who it can hand work to. The roster is
+  // registered as runtime context (a snapshot appended after retained history,
+  // only when its text changed), so bots created or deleted mid-session show up
+  // without a restart and without rewriting the cached prompt prefix.
   function rosterText(self) {
     const snapshot = store.peek((db) => ({ bots: db.bots || [], tasks: db.tasks || [] }))
     const others = snapshot.bots.filter((bot) => bot.id !== self.id && !bot.archived)
@@ -303,9 +303,9 @@ export function createService({ ctx, store, log }) {
   }
 
   // The orchestrator also needs to know which workspaces exist and what each is
-  // for: a task binds to a workspace, and its session is created there. Kept as
-  // a prompt variable (refreshed on every request) rather than a chat message so
-  // the list never piles up in the conversation.
+  // for: a task binds to a workspace, and its session is created there. Exposed
+  // through a system-prompt variable + runtime context rather than a chat
+  // message, so the list never piles up in the conversation.
   function workspaceRosterText(self) {
     try {
       const registry = ctx.get('workspaceRegistry', false)
@@ -343,28 +343,35 @@ export function createService({ ctx, store, log }) {
     const agentCtx = agent && agent.ctx
     if (!agentCtx || typeof agentCtx.get !== 'function') return () => {}
     const systemPrompt = agentCtx.get('systemPrompt', false)
-    if (!systemPrompt || typeof systemPrompt.variable !== 'function' || typeof systemPrompt.section !== 'function') {
+    if (!systemPrompt || typeof systemPrompt.variable !== 'function' || typeof systemPrompt.context !== 'function') {
       trace('roster skipped: no systemPrompt service')
       return () => {}
     }
     try {
       // Variable first: an unresolved {{…}} reference fails assembly outright.
       const disposeVariable = systemPrompt.variable('dsh_bots_roster', () => rosterText(bot)) || (() => {})
-      const disposeSection =
-        systemPrompt.section({
+      // Runtime context rather than a prompt section: sections are re-rendered
+      // into surface node 0, so any change rewrites the very first token and
+      // throws away the whole cached prefix. A context snapshot is logged after
+      // the retained history and only when its text changed, so a roster update
+      // costs just the new snapshot instead of the entire conversation.
+      const disposeRoster =
+        systemPrompt.context({
           name: 'dsh-bots:orchestrator-roster',
           order: 10250, // after first-party guidance and the persona suffix
+          required: true, // orchestration is useless without the roster; keep it even when optional context is suppressed
           text: '## 当前可用的其他 bots\n下面这份名单每次请求前都会刷新，可以直接按 id 指派：\n{{dsh_bots_roster}}\n用 task_assign / task_dispatch 指派；要新帮手就用 bot_create。任务板的后台事件（如执行 bot 交回）不会自动发消息，需要时用 inbox_list 查看，读完即清空。',
         }) || (() => {})
-      // Workspaces are a separate section: task_create inherits the caller's
+      // Workspaces are a separate context: task_create inherits the caller's
       // workspace by default, so the orchestrator must be able to name another
-      // one on purpose. Listing them as a rendered prompt section keeps the
-      // list out of the chat transcript and refreshes it on every request.
+      // one on purpose. A context keeps the list out of the chat transcript and
+      // refreshes it only when the registry actually changed.
       const disposeWorkspaceVariable = systemPrompt.variable('dsh_bots_workspaces', () => workspaceRosterText(bot)) || (() => {})
-      const disposeWorkspaceSection =
-        systemPrompt.section({
+      const disposeWorkspaceContext =
+        systemPrompt.context({
           name: 'dsh-bots:orchestrator-workspaces',
           order: 10260,
+          required: true,
           text: [
             '## 可用的 workspace（任务与执行会话落在哪里）',
             '这份清单每次请求前刷新；下面的 id 和路径都可以直接填给 task_create / task_update / task_new_session 的 workspace_id。',
@@ -375,15 +382,15 @@ export function createService({ ctx, store, log }) {
             '- 任务已经建好但 workspace 填错了：先用 task_update 改 workspace_id，再 task_dispatch；旧会话还停在旧目录时用 task_new_session 重建（旧会话解绑作废，任务与评论都保留）。',
           ].join('\n'),
         }) || (() => {})
-      trace('roster section registered')
+      trace('roster context registered')
       return () => {
-        try { disposeWorkspaceSection() } catch { /* ignore */ }
+        try { disposeWorkspaceContext() } catch { /* ignore */ }
         try { disposeWorkspaceVariable() } catch { /* ignore */ }
-        try { disposeSection() } catch { /* ignore */ }
+        try { disposeRoster() } catch { /* ignore */ }
         try { disposeVariable() } catch { /* ignore */ }
       }
     } catch (error) {
-      log('dsh-bots: roster section failed', error)
+      log('dsh-bots: roster context failed', error)
       return () => {}
     }
   }

@@ -84,22 +84,23 @@ Host 侧不 import 任何 `@deepseek-ai/dsh-*` 包：需要 `defineTool` 时 `ct
 
 ## v43 补充：主控怎么看得到 workspace
 
-`rosterText` 只列 bot，主控原本无从知道 workspace 的 id，`task_create.workspace_id` 只能靠用户口述路径。补法沿用 roster 的既有机制——`systemPrompt.variable` + `systemPrompt.section`（不是对话消息）：
+`rosterText` 只列 bot，主控原本无从知道 workspace 的 id，`task_create.workspace_id` 只能靠用户口述路径。补法沿用 roster 的机制——`systemPrompt.variable` + `systemPrompt.context`（不是对话消息，也不是 system 节点）：
 
-- `workspaceRosterText(self)` 每次请求前同步读 `workspaceRegistry.list()`，输出标题 / `workspace_id` / 路径，并标出「默认」与「你当前会话在这里」（按 id 或规范化后的路径比对）。
-- `applyRoster` 里注册 section `dsh-bots:orchestrator-workspaces`（order 10260，紧跟 roster 的 10250），文本说明三件事：不填 workspace_id 会继承当前 workspace；任务会话开在任务自己的 workspace，与主控会话无关；DSH 只校验目标 workspace 存在，不限制跨 workspace 建会话，改错后用 `task_update` + `task_new_session`。
-- 为什么不用 runtime-context / 对话消息：`docs/architecture.md:130` 的不变量是「Model-visible means logged」，任何模型可见输入都必须有 session event，所以「注入但不落日志」在本框架里做不到。`systemPrompt.section` 渲染成 system/message 节点 0 并在内容变化时原地替换，既不堆对话消息，也天然满足可重建；若想让提示更「贴尾」，可以换 `systemPrompt.context`（durable user-role snapshot），代价是它会作为一条 user-role 快照进入历史。
-- 测试：`tests/roster.test.mjs` 用假 ctx / store 走真实 `attach`，断言 section 注册、变量引用、id/路径/默认/当前会话标记，以及空仓库与无 `workspaceRegistry` 时的降级文案。
+- `workspaceRosterText(self)` 每次请求前同步读 `workspaceRegistry.list()`，输出标题 / `workspace_id` / 路径，并标出「默认」与「你当前会话在这里」（按 id 或规范化后的路径比对）；结果按 id 排序，注册表顺序变化不会导致文本抖动。
+- `applyRoster` 里注册 context `dsh-bots:orchestrator-workspaces`（order 10260，紧跟 bot 名单的 10250，`required: true`），文本说明三件事：不填 workspace_id 会继承当前 workspace；任务会话开在任务自己的 workspace，与主控会话无关；DSH 只校验目标 workspace 存在，不限制跨 workspace 建会话，改错后用 `task_update` + `task_new_session`。
+- bot 名单也在 v2 里从 section 换成了 context：`dsh-bots:orchestrator-roster`（order 10250，`required: true`）。两段都靠 `{{dsh_bots_roster}}` / `{{dsh_bots_workspaces}}` 变量插值，变量仍由 `systemPrompt.variable` 提供。
+- 为什么是 context：`docs/architecture.md:130` 的不变量是「Model-visible means logged」，任何模型可见输入都必须有 session event，所以「注入但不落日志」在本框架里做不到；而 `systemPrompt.context` 是框架明确标注的 cache-safe 形态——快照只在内容变化时追加在保留历史之后，不会重写 system/message 节点 0。`required: true` 保证即使全局关掉可选 runtime-context，这两段仍然在。
+- 测试：`tests/roster.test.mjs` 用假 ctx / store 走真实 `attach`，断言两段 context 的注册、`required`、变量引用、id/路径/默认/当前会话标记，以及空仓库与无 `workspaceRegistry` 时的降级文案。
 
 ### prompt cache 上的代价
 
 DSH 的 `docs/subsystems/system-prompt.md` 写明两条不同的落点：section 的渲染文本「committed as a `system/message` surface node — appended as surface node 0 on the first step, then replaced in place when the rendered text changes」；context 则是「cache-safe counterpart」，快照只在变化时追加在保留历史之后。也就是说：
 
 - 内容不变时两者都不产生新 token，steady state 不掉 cache；
-- 一旦 workspace 清单变了，section 会重写节点 0 —— 后续整段对话的前缀全部失配，下一次请求按未缓存计；
-- 若改用 `systemPrompt.context`，变化只会在尾部追加一小段快照，前面全部复用，但这段会作为 user-role 消息留在历史里（且压缩时会被遮蔽）。
+- section 一旦变，会重写节点 0 —— 后续整段对话的前缀全部失配，下一次请求按未缓存计；
+- context 变化只在尾部追加一小段快照，前面全部复用，只有新增的 token 未命中；代价是这段会作为 user-role 快照进入历史（压缩时会被遮蔽）。
 
-清单本身变化频率极低（新增/改名 workspace 才变），所以选了 section；`workspaceRosterText` 按 id 排序，避免注册表顺序抖动造成误伤。真要做到「永不碰节点 0」，把这段改成 `systemPrompt.context({ name, text, order })` 即可，客户端与工具层都不用动。
+bot 名单和 workspace 清单都可能在会话中途变（新建 bot、加 workspace），而且它们位于提示词最靠前的部分，用 section 会连累整段前缀，所以两段都改成了 `systemPrompt.context` + `required: true`。`workspaceRosterText` / `rosterText` 的输出按 id 排序，保证「内容没变就一个字都不变」，不会因为注册表顺序抖动而产生新快照。
 
 ## v44：协作台与右侧栏入口
 
@@ -110,3 +111,12 @@ DSH 的 `docs/subsystems/system-prompt.md` 写明两条不同的落点：section
 - **右侧栏**：`sidebarRightTabs.register` 的标签标题改成「协作台」，`sidebar.right.pane.tab` 的 body 从原来的 `BotsSidePane` 换成同一份 `Panel`——聊天时点开就是完整看板（含「+ 任务」「+ Bot」），不用切走。`BotsSidePane` 与板头的「右侧栏」按钮因此一并删除。
 - **代价**：右侧栏用 `keepMounted`，面板在关闭状态下仍每 10 秒拉一次 `/state`；本地服务，暂时可接受，需要时改成「可见时才轮询」。
 - `BUILD` 升到 `v44-collab-pane`。
+
+## v45：roster 与 workspace 清单改走 runtime context
+
+两段提示从 `systemPrompt.section` 换成 `systemPrompt.context`（`required: true`），理由见上面「prompt cache 上的代价」：会话中途新建 bot / 加 workspace 时，section 会重写 system/message 节点 0、作废整段前缀；context 只在尾部追加一份快照。
+
+- 实测：宿主重载后，主控会话（`session-931dde89-…`）的下一次组装在 `seq 460` 追加了一条 `source.kind='runtime-context'` 的 user-role 快照，长度 2264 字符，里面同时含 bot 名单与 workspace 清单（`workspace_id: 91f1d133…`、默认与「你当前会话在这里」标记）；之后多个 step 没有再追加，说明文本没变就不会产生新快照。
+- 变量仍由 `systemPrompt.variable` 提供（`dsh_bots_roster` / `dsh_bots_workspaces`），context 文本里的 `{{…}}` 正常插值。
+- `required: true` 保留原先 section 的语义：即使全局关掉可选 runtime-context，这两段仍然在（否则主控会静默失去 bot 与 workspace 名单）。
+- `BUILD` 升到 `v45-context-roster`。
