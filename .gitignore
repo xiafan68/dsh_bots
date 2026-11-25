@@ -15,3 +15,5 @@ Thumbs.db
 
 # 本机需求笔记：属于其他项目，不是本插件的文档
 docs/T-0024-*.md
+# transient commit messages / scratch
+tmp-*.txt

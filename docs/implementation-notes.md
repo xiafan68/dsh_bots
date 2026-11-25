@@ -90,3 +90,13 @@ Host 侧不 import 任何 `@deepseek-ai/dsh-*` 包：需要 `defineTool` 时 `ct
 - `applyRoster` 里注册 section `dsh-bots:orchestrator-workspaces`（order 10260，紧跟 roster 的 10250），文本说明三件事：不填 workspace_id 会继承当前 workspace；任务会话开在任务自己的 workspace，与主控会话无关；DSH 只校验目标 workspace 存在，不限制跨 workspace 建会话，改错后用 `task_update` + `task_new_session`。
 - 为什么不用 runtime-context / 对话消息：`docs/architecture.md:130` 的不变量是「Model-visible means logged」，任何模型可见输入都必须有 session event，所以「注入但不落日志」在本框架里做不到。`systemPrompt.section` 渲染成 system/message 节点 0 并在内容变化时原地替换，既不堆对话消息，也天然满足可重建；若想让提示更「贴尾」，可以换 `systemPrompt.context`（durable user-role snapshot），代价是它会作为一条 user-role 快照进入历史。
 - 测试：`tests/roster.test.mjs` 用假 ctx / store 走真实 `attach`，断言 section 注册、变量引用、id/路径/默认/当前会话标记，以及空仓库与无 `workspaceRegistry` 时的降级文案。
+
+## v44：协作台与右侧栏入口
+
+界面层只动了 `lib/client.js`，数据与工具不变。
+
+- **改名**：侧栏入口、板头标题、右侧栏标签都从「任务板 / Bots」统一成「协作台」；板内两个页签仍是「任务 / Bots」。
+- **去重**：删掉左侧第二个 `sidebar.panellist`（`dsh-bots-bots`）及其 `main` 面板、`BotsPanel` 组件，bot 列表只在协作台的「Bots」页签里。
+- **右侧栏**：`sidebarRightTabs.register` 的标签标题改成「协作台」，`sidebar.right.pane.tab` 的 body 从原来的 `BotsSidePane` 换成同一份 `Panel`——聊天时点开就是完整看板（含「+ 任务」「+ Bot」），不用切走。`BotsSidePane` 与板头的「右侧栏」按钮因此一并删除。
+- **代价**：右侧栏用 `keepMounted`，面板在关闭状态下仍每 10 秒拉一次 `/state`；本地服务，暂时可接受，需要时改成「可见时才轮询」。
+- `BUILD` 升到 `v44-collab-pane`。
