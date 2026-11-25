@@ -52,7 +52,7 @@
     }
   },
   "scripts": {
-    "test": "node tests/chat-flow.test.mjs && node tests/store.test.mjs",
+    "test": "node tests/chat-flow.test.mjs && node tests/store.test.mjs && node tests/roster.test.mjs",
     "test:api": "node tests/e2e-chat-api.mjs",
     "test:ui": "node tests/e2e-ui-chat.mjs",
     "test:matrix": "node tests/e2e-chat-matrix.mjs"

@@ -153,7 +153,7 @@ export function registerTools({ ctx, store, service, log }) {
       labels: { type: 'string', description: '标签，逗号分隔' },
       status: { type: 'string', description: 'backlog / todo，默认 todo（todo 表示可以派了）' },
       notify: { type: 'string', description: '任务结束时怎么通知主控：silent（只进收件箱）/ visible（发可见通知）；留空按默认' },
-      workspace_id: { type: 'string', description: '任务绑定的 workspace（id 或绝对路径）；留空继承你当前会话所在的 workspace。执行 bot 的会话会开在这个 workspace 里' },
+      workspace_id: { type: 'string', description: '任务绑定的 workspace（id 或绝对路径）；留空继承你当前会话所在的 workspace。可选的 id 见系统提示里的「可用的 workspace」清单。执行 bot 的会话会开在这个 workspace 里' },
     },
     async run({ args, store, exec, service }) {
       let assignee = null

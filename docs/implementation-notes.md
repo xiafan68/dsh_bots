@@ -81,3 +81,12 @@ Host 侧不 import 任何 `@deepseek-ai/dsh-*` 包：需要 `defineTool` 时 `ct
 - **工具**：主控新增 `task_new_session`（`task_id` / `workspace_id` / `reason`）；`task_update` 增加 `workspace_id`。改绑只改数据，下一次派发触发重建（也可以立刻 `task_new_session`）。
 - **权限**：`grantFullAccess` 优先 `ctx.permissionPresets.set(session, 'danger-full-access')`——一次把 sandbox 与 approval 两个旋钮都切过去；宿主的 `permissionPresets` 服务不存在时才退回 `approval.setPolicy(agent, 'never')`。
 - **测试**：`tests/store.test.mjs` 覆盖 workspace 改绑、`unbindSession`、会话回写；`npm test` 串跑决策表与存储层。`BUILD` 升到 `v43-workspace-sessions`，可用 `/dsh-bots/api/state` 确认宿主已换代码。
+
+## v43 补充：主控怎么看得到 workspace
+
+`rosterText` 只列 bot，主控原本无从知道 workspace 的 id，`task_create.workspace_id` 只能靠用户口述路径。补法沿用 roster 的既有机制——`systemPrompt.variable` + `systemPrompt.section`（不是对话消息）：
+
+- `workspaceRosterText(self)` 每次请求前同步读 `workspaceRegistry.list()`，输出标题 / `workspace_id` / 路径，并标出「默认」与「你当前会话在这里」（按 id 或规范化后的路径比对）。
+- `applyRoster` 里注册 section `dsh-bots:orchestrator-workspaces`（order 10260，紧跟 roster 的 10250），文本说明三件事：不填 workspace_id 会继承当前 workspace；任务会话开在任务自己的 workspace，与主控会话无关；DSH 只校验目标 workspace 存在，不限制跨 workspace 建会话，改错后用 `task_update` + `task_new_session`。
+- 为什么不用 runtime-context / 对话消息：`docs/architecture.md:130` 的不变量是「Model-visible means logged」，任何模型可见输入都必须有 session event，所以「注入但不落日志」在本框架里做不到。`systemPrompt.section` 渲染成 system/message 节点 0 并在内容变化时原地替换，既不堆对话消息，也天然满足可重建；若想让提示更「贴尾」，可以换 `systemPrompt.context`（durable user-role snapshot），代价是它会作为一条 user-role 快照进入历史。
+- 测试：`tests/roster.test.mjs` 用假 ctx / store 走真实 `attach`，断言 section 注册、变量引用、id/路径/默认/当前会话标记，以及空仓库与无 `workspaceRegistry` 时的降级文案。

@@ -302,6 +302,40 @@ export function createService({ ctx, store, log }) {
       .join('\n')
   }
 
+  // The orchestrator also needs to know which workspaces exist and what each is
+  // for: a task binds to a workspace, and its session is created there. Kept as
+  // a prompt variable (refreshed on every request) rather than a chat message so
+  // the list never piles up in the conversation.
+  function workspaceRosterText(self) {
+    try {
+      const registry = ctx.get('workspaceRegistry', false)
+      if (!registry || typeof registry.list !== 'function') return '（workspace 服务不可用，暂时列不出来）'
+      const state = typeof registry.state === 'object' && registry.state ? registry.state : null
+      const defaultId = state && state.defaultWorkspaceId ? String(state.defaultWorkspaceId) : ''
+      const own = String((self && (self.workspaceId || self.cwd)) || '')
+      const plain = (value) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+      const rows = (registry.list() || [])
+        .map((workspace) => ({
+          id: String(workspace.workspaceId || workspace.id || ''),
+          path: (workspace.header && workspace.header.path) || workspace.path || workspace.cwd || '',
+          title: (workspace.header && workspace.header.title) || workspace.title || '',
+        }))
+        .filter((workspace) => workspace.id)
+      if (!rows.length) return '（还没有注册任何 workspace）'
+      return rows
+        .map((workspace) => {
+          const bits = [workspace.title || workspace.path || workspace.id]
+          if (workspace.id === defaultId) bits.push('默认')
+          if (own && (workspace.id === own || (workspace.path && plain(workspace.path) === plain(own)))) bits.push('你当前会话在这里')
+          return '- ' + bits.join(' · ') + '\n  workspace_id: ' + workspace.id + (workspace.path ? '\n  路径: ' + workspace.path : '')
+        })
+        .join('\n')
+    } catch (error) {
+      trace('workspaceRosterText failed: ' + String(error && error.message ? error.message : error))
+      return '（读取 workspace 列表失败）'
+    }
+  }
+
   function applyRoster(agent, bot) {
     const agentCtx = agent && agent.ctx
     if (!agentCtx || typeof agentCtx.get !== 'function') return () => {}
@@ -319,8 +353,29 @@ export function createService({ ctx, store, log }) {
           order: 10250, // after first-party guidance and the persona suffix
           text: '## 当前可用的其他 bots\n下面这份名单每次请求前都会刷新，可以直接按 id 指派：\n{{dsh_bots_roster}}\n用 task_assign / task_dispatch 指派；要新帮手就用 bot_create。任务板的后台事件（如执行 bot 交回）不会自动发消息，需要时用 inbox_list 查看，读完即清空。',
         }) || (() => {})
+      // Workspaces are a separate section: task_create inherits the caller's
+      // workspace by default, so the orchestrator must be able to name another
+      // one on purpose. Listing them as a rendered prompt section keeps the
+      // list out of the chat transcript and refreshes it on every request.
+      const disposeWorkspaceVariable = systemPrompt.variable('dsh_bots_workspaces', () => workspaceRosterText(bot)) || (() => {})
+      const disposeWorkspaceSection =
+        systemPrompt.section({
+          name: 'dsh-bots:orchestrator-workspaces',
+          order: 10260,
+          text: [
+            '## 可用的 workspace（任务与执行会话落在哪里）',
+            '这份清单每次请求前刷新；下面的 id 和路径都可以直接填给 task_create / task_update / task_new_session 的 workspace_id。',
+            '{{dsh_bots_workspaces}}',
+            '怎么用：',
+            '- task_create 不填 workspace_id 时，新任务继承你当前会话所在的 workspace；要落到别的项目，就填 workspace_id（id 或绝对路径）。',
+            '- 每个任务绑定自己的 workspace，分派时执行 bot 的会话就开在那个目录里，和你自己会话所在的 workspace 无关；DSH 只校验 workspace 存在，不限制你为其它 workspace 建会话。',
+            '- 任务已经建好但 workspace 填错了：先用 task_update 改 workspace_id，再 task_dispatch；旧会话还停在旧目录时用 task_new_session 重建（旧会话解绑作废，任务与评论都保留）。',
+          ].join('\n'),
+        }) || (() => {})
       trace('roster section registered')
       return () => {
+        try { disposeWorkspaceSection() } catch { /* ignore */ }
+        try { disposeWorkspaceVariable() } catch { /* ignore */ }
         try { disposeSection() } catch { /* ignore */ }
         try { disposeVariable() } catch { /* ignore */ }
       }
