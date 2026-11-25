@@ -91,6 +91,16 @@ Host 侧不 import 任何 `@deepseek-ai/dsh-*` 包：需要 `defineTool` 时 `ct
 - 为什么不用 runtime-context / 对话消息：`docs/architecture.md:130` 的不变量是「Model-visible means logged」，任何模型可见输入都必须有 session event，所以「注入但不落日志」在本框架里做不到。`systemPrompt.section` 渲染成 system/message 节点 0 并在内容变化时原地替换，既不堆对话消息，也天然满足可重建；若想让提示更「贴尾」，可以换 `systemPrompt.context`（durable user-role snapshot），代价是它会作为一条 user-role 快照进入历史。
 - 测试：`tests/roster.test.mjs` 用假 ctx / store 走真实 `attach`，断言 section 注册、变量引用、id/路径/默认/当前会话标记，以及空仓库与无 `workspaceRegistry` 时的降级文案。
 
+### prompt cache 上的代价
+
+DSH 的 `docs/subsystems/system-prompt.md` 写明两条不同的落点：section 的渲染文本「committed as a `system/message` surface node — appended as surface node 0 on the first step, then replaced in place when the rendered text changes」；context 则是「cache-safe counterpart」，快照只在变化时追加在保留历史之后。也就是说：
+
+- 内容不变时两者都不产生新 token，steady state 不掉 cache；
+- 一旦 workspace 清单变了，section 会重写节点 0 —— 后续整段对话的前缀全部失配，下一次请求按未缓存计；
+- 若改用 `systemPrompt.context`，变化只会在尾部追加一小段快照，前面全部复用，但这段会作为 user-role 消息留在历史里（且压缩时会被遮蔽）。
+
+清单本身变化频率极低（新增/改名 workspace 才变），所以选了 section；`workspaceRosterText` 按 id 排序，避免注册表顺序抖动造成误伤。真要做到「永不碰节点 0」，把这段改成 `systemPrompt.context({ name, text, order })` 即可，客户端与工具层都不用动。
+
 ## v44：协作台与右侧栏入口
 
 界面层只动了 `lib/client.js`，数据与工具不变。

@@ -321,6 +321,9 @@ export function createService({ ctx, store, log }) {
           title: (workspace.header && workspace.header.title) || workspace.title || '',
         }))
         .filter((workspace) => workspace.id)
+        // Deterministic order: the rendered text is part of the cached prompt
+        // prefix, so an incidental registry reorder must not invalidate it.
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       if (!rows.length) return '（还没有注册任何 workspace）'
       return rows
         .map((workspace) => {
