@@ -64,6 +64,12 @@ const rosterContext = contexts.find((item) => item.name === ROSTER_CONTEXT)
 assert.ok(rosterContext, 'the bot roster should be registered as runtime context')
 assert.equal(rosterContext.required, true, 'the roster must survive optional-context suppression')
 assert.match(rosterContext.text, /\{\{dsh_bots_roster\}\}/, 'roster context must reference its variable')
+// The roster lands in a runtime-context snapshot: any change appends another
+// one, so it must not carry per-task state (that flips on every dispatch).
+const rosterProbe = harness({ workspaces: WORKSPACES })
+await rosterProbe.service.attach(rosterProbe.agent)
+const rosterBody = rosterProbe.variables.get('dsh_bots_roster')()
+assert.doesNotMatch(rosterBody, /在办|空闲/, 'roster must stay free of task load counters')
 
 const workspaceContext = contexts.find((item) => item.name === WORKSPACE_CONTEXT)
 assert.ok(workspaceContext, 'workspace context should be registered for the orchestrator')

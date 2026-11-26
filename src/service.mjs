@@ -285,16 +285,14 @@ export function createService({ ctx, store, log }) {
     const snapshot = store.peek((db) => ({ bots: db.bots || [], tasks: db.tasks || [] }))
     const others = snapshot.bots.filter((bot) => bot.id !== self.id && !bot.archived)
     if (!others.length) return '当前没有其他 bot。需要新帮手时可以用 bot_create 创建一个。'
-    const busy = (botId) =>
-      snapshot.tasks.filter(
-        (task) => task.status === 'in_progress' && task.assignee && task.assignee.kind === 'bot' && task.assignee.id === botId,
-      ).length
+    // Deliberately free of task state: this text lives in a runtime-context
+    // snapshot, and every change appends a new one. A per-bot "在办 N" counter
+    // flips on every dispatch/finish, which would turn task churn into context
+    // churn; load is available through task_list when it actually matters.
     return others
       .map((bot) => {
         const bits = [bot.name, bot.id]
         if (bot.isOrchestrator) bits.push('主控')
-        const running = busy(bot.id)
-        bits.push(running ? `在办 ${running}` : '空闲')
         if (bot.skills.length) bits.push(`技能 ${bot.skills.join('/')}`)
         bits.push(bot.sessionId ? '已有会话' : '还没有会话')
         return '- ' + bits.join(' · ')

@@ -119,4 +119,6 @@ bot 名单和 workspace 清单都可能在会话中途变（新建 bot、加 wor
 - 实测：宿主重载后，主控会话（`session-931dde89-…`）的下一次组装在 `seq 460` 追加了一条 `source.kind='runtime-context'` 的 user-role 快照，长度 2264 字符，里面同时含 bot 名单与 workspace 清单（`workspace_id: 91f1d133…`、默认与「你当前会话在这里」标记）；之后多个 step 没有再追加，说明文本没变就不会产生新快照。
 - 变量仍由 `systemPrompt.variable` 提供（`dsh_bots_roster` / `dsh_bots_workspaces`），context 文本里的 `{{…}}` 正常插值。
 - `required: true` 保留原先 section 的语义：即使全局关掉可选 runtime-context，这两段仍然在（否则主控会静默失去 bot 与 workspace 名单）。
+- roster 去掉了每个 bot 的「在办 N / 空闲」计数：那部分随任务起止翻转，会把任务 churn 变成快照 churn；现在的名单只含名字、id、主控标记、技能、是否已有会话，负载让主控需要时用 `task_list` 查。`tests/roster.test.mjs` 里加了一条断言防止它被加回来。
+- 开发期现象：插件重载时 context 会先 dispose 再重注册，于是会话里会各留下一条「没有 roster」和「有 roster」的快照（实测 seq 515 → 526）。这是重载造成的，steady state 不会发生；生产环境只在插件升级时出现一次。
 - `BUILD` 升到 `v45-context-roster`。
