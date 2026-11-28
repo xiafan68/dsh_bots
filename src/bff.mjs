@@ -2,7 +2,7 @@ import { STATUSES, PRIORITY_LIST } from './store.mjs'
 
 export const ROUTE_PREFIX = '/dsh-bots/api'
 
-export const BUILD = 'v45-context-roster'
+export const BUILD = 'v46-round-notices'
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload === undefined ? null : payload)

@@ -14,7 +14,8 @@ const ROLE_ORCHESTRATOR = `你是这台 DSH 里的**主控 bot**（私人助理�
 3. 决策由你来做：能自己决定，就不要「问一下用户」；只有涉及不可逆、花钱、改变既有约定时才问。
 4. 分派前先看看 task_list，能合并的就合并，别造一堆重复任务。
 5. 用户问「进展如何」时用 task_list 读真实状态，不要凭印象汇报；被验收通过的任务再说「完成」。
-6. 任务完成会以系统消息通知你，你需要**按用户视角汇总**：做了什么、现在能验证什么、有什么没做到、下一步建议。
+6. 任务每轮结束（交回、受阻、被停止、超时）都会以「任务板通知」的形式发给你，里面带着任务 id、执行方、结果与当前状态。收到后：先 task_get 读真实结果与评论 → 够格就 task_update status=done 验收，不够就补一句说明再 task_dispatch 打回重跑 → 需要用户知道时才用两三句话说结论，不要整段转述执行者的报告。
+7. 没有通知时不要空转轮询：只有在用户问进展、或你要做派发决策时才 task_list / inbox_list。
 
 关于你手上的工具：task_create / task_list / task_get / task_update / task_assign / task_dispatch / task_new_session / task_comment / bot_list。
 
@@ -843,7 +844,6 @@ export function createService({ ctx, store, log }) {
       const fresh = await store.getTask(taskId)
       if (fresh && fresh.activeRoundId === roundId) {
         await finishRound(taskId, { status: 'completed', note: '轮次结束（未收到 task_complete）' })
-        await notifyOrchestrator(`【任务轮次结束】${fresh.id} ${fresh.title} — ${bot.name} 的一轮已结束，但没有收到 task_complete，请核对。`, { urgent: true, taskId: fresh.id })
       }
     } catch (error) {
       log('dsh-bots: round watcher failed', error)
@@ -937,7 +937,7 @@ export function createService({ ctx, store, log }) {
     if (task.activeRoundId) {
       // The abandoned conversation must not keep editing the wrong directory while
       // its replacement starts.
-      await stopRound(task.id, { reason: '为任务新建执行会话，旧会话作废' }).catch(() => {})
+      await stopRound(task.id, { reason: '为任务新建执行会话，旧会话作废', silent: true }).catch(() => {})
     }
     const rebuilt = await rebuildTaskSession(task, bot, { workspaceId: options.workspaceId })
     await rebind(rebuilt.sessionId)
@@ -976,7 +976,53 @@ export function createService({ ctx, store, log }) {
     // lives inside the finishing agent's own turn, and we must not await a new
     // session start from inside it.
     setTimeout(() => { drainQueue(taskId).catch((error) => log('dsh-bots: drain queued dispatch failed', error)) }, 0)
+    // A finished or stopped round is exactly the moment the orchestrator has to
+    // act (accept the result, unblock, reassign), so it gets one notice per
+    // round instead of having to poll. `silent` is for internal housekeeping
+    // (rebuilding a session), where a notice would only be noise.
+    if (!options.silent) {
+      try {
+        await announceRoundEnd(taskId, options, finished)
+      } catch (error) {
+        log('dsh-bots: round notice failed', error)
+      }
+    }
     return finished
+  }
+
+  function roundOutcomeText(status) {
+    if (status === 'completed') return '轮次结束，等待验收'
+    return '轮次失败'
+  }
+
+  // One place builds the notice: task, executor, outcome, current status and the
+  // next action. The orchestrator still reads the real task with task_get — the
+  // note is a pointer, not an evaluation.
+  async function announceRoundEnd(taskId, options = {}, finished = null) {
+    const task = (finished && finished.task) || (await store.getTask(taskId))
+    if (!task) return
+    const executor = task.assignee && task.assignee.kind === 'bot' ? task.assignee.id : ''
+    // The orchestrator may be executing a task itself (agentRequired off); do not
+    // push a notice into the turn that is producing it.
+    const target = await orchestratorSession()
+    if (target && target.sessionId && task.sessionId && target.sessionId === task.sessionId) {
+      trace('skip round notice: the orchestrator runs ' + task.id + ' itself')
+      return
+    }
+    const bot = executor ? await store.getBot(executor).catch(() => null) : null
+    const who = bot ? bot.name + '（' + bot.id + '）' : executor || '未指派'
+    const lines = [
+      `任务 ${task.id}「${task.title}」${roundOutcomeText(options.status)}`,
+      `执行方：${who}${task.sessionId ? ' · 会话 ' + task.sessionId : ''}`,
+    ]
+    if (options.note) lines.push(`说明：${options.note}`)
+    lines.push(`当前状态：${task.status}`)
+    lines.push(
+      options.status === 'completed'
+        ? '下一步：task_get 看结果与评论，够了就 task_update status=done 验收；不够就补一句说明再 task_dispatch 重跑。'
+        : '下一步：task_get 看卡在哪，补信息后 task_update status=todo 再 task_dispatch；确实做不了就向用户说明。',
+    )
+    await notifyOrchestrator(lines.join('\n'), { taskId: task.id, urgent: true })
   }
 
   async function drainQueue(taskId) {
@@ -986,7 +1032,12 @@ export function createService({ ctx, store, log }) {
     const pending = await store.takePendingDispatch(taskId)
     trace('draining queued dispatch for ' + taskId)
     const result = await dispatchTask(taskId, { byBotId: pending && pending.botId })
-    if (!result.ok) log('dsh-bots: queued dispatch failed for ' + taskId, result.error)
+    if (!result.ok) {
+      log('dsh-bots: queued dispatch failed for ' + taskId, result.error)
+      // Nobody is waiting on a queued dispatch, so the orchestrator has to hear
+      // about the failure instead of finding a stuck task later.
+      await notifyOrchestrator(`排队中的派发没有跑起来：任务 ${taskId}。原因：${result.error}`, { taskId, urgent: true }).catch(() => {})
+    }
   }
 
   async function dispatchTask(taskId, { byBotId = null } = {}) {
@@ -1023,7 +1074,7 @@ export function createService({ ctx, store, log }) {
     try {
       await deliver(sessionId, taskPrompt(task, bot))
     } catch (error) {
-      await finishRound(task.id, { status: 'failed', note: `投递失败：${error && error.message ? error.message : error}` })
+      await finishRound(task.id, { status: 'failed', note: `投递失败：${error && error.message ? error.message : error}`, silent: true })
       return { ok: false, error: `无法把任务投递到 ${bot.name} 的会话：${error && error.message ? error.message : error}` }
     }
 
@@ -1093,7 +1144,7 @@ export function createService({ ctx, store, log }) {
     return pending.length
   }
 
-  async function stopRound(taskId, { reason = '人工中止' } = {}) {
+  async function stopRound(taskId, { reason = '人工中止', silent = false } = {}) {
     const task = await store.getTask(taskId)
     if (!task) return { ok: false, error: `任务 ${taskId} 不存在` }
     if (!task.activeRoundId) return { ok: false, error: `任务 ${task.id} 当前没有进行中的轮次` }
@@ -1108,7 +1159,7 @@ export function createService({ ctx, store, log }) {
         }
       }
     }
-    await finishRound(task.id, { status: 'failed', note: reason })
+    await finishRound(task.id, { status: 'failed', note: reason, silent })
     return { ok: true, taskId: task.id, roundId }
   }
 

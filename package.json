@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-bots",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Bots and a shared human/agent task board for DSH: create bots with their own persona and skills, give them private chats, assign tasks on a kanban board and let an orchestrator bot dispatch and report. Bot 与任务看板：给 bot 配人格与技能，私聊派活，主控 bot 分派与汇报。",
   "keywords": [
@@ -52,7 +52,7 @@
     }
   },
   "scripts": {
-    "test": "node tests/chat-flow.test.mjs && node tests/store.test.mjs && node tests/roster.test.mjs",
+    "test": "node tests/chat-flow.test.mjs && node tests/store.test.mjs && node tests/roster.test.mjs && node tests/notify.test.mjs",
     "test:api": "node tests/e2e-chat-api.mjs",
     "test:ui": "node tests/e2e-ui-chat.mjs",
     "test:matrix": "node tests/e2e-chat-matrix.mjs"

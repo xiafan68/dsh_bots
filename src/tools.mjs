@@ -372,7 +372,6 @@ export function registerTools({ ctx, store, service, log }) {
       const result = lines.join('\n')
       await store.addComment(task.id, bot ? bot.id : 'worker', result)
       const finished = await service.finishRound(task.id, { status: 'completed', note: args.summary.slice(0, 200), result })
-      await service.notifyOrchestrator(`任务 ${task.id}「${task.title}」已交回，进入待验收。\n${result}`, { urgent: false, taskId: task.id })
       return finished && finished.task ? `已交回 ${task.id}，等待验收。` : `已交回 ${task.id}。`
     },
   })
@@ -389,9 +388,13 @@ export function registerTools({ ctx, store, service, log }) {
       const task = await store.getTask(args.task_id)
       if (!task) return `没有任务 ${args.task_id}。`
       await store.addComment(task.id, bot ? bot.id : 'worker', `【受阻】${args.reason}`)
-      if (task.activeRoundId) await service.finishRound(task.id, { status: 'failed', note: args.reason })
+      if (task.activeRoundId) {
+        // finishRound announces the failure; a second notice here would be noise.
+        await service.finishRound(task.id, { status: 'failed', note: args.reason })
+      } else {
+        await service.notifyOrchestrator(`任务 ${task.id}「${task.title}」受阻：${args.reason}`, { urgent: true, taskId: task.id })
+      }
       await store.updateTask(task.id, { status: 'blocked' })
-      await service.notifyOrchestrator(`任务 ${task.id}「${task.title}」受阻：${args.reason}`, { urgent: true, taskId: task.id })
       return `已把 ${task.id} 标记为受阻并通知主控。`
     },
   })

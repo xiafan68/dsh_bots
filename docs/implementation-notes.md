@@ -122,3 +122,19 @@ bot 名单和 workspace 清单都可能在会话中途变（新建 bot、加 wor
 - roster 去掉了每个 bot 的「在办 N / 空闲」计数：那部分随任务起止翻转，会把任务 churn 变成快照 churn；现在的名单只含名字、id、主控标记、技能、是否已有会话，负载让主控需要时用 `task_list` 查。`tests/roster.test.mjs` 里加了一条断言防止它被加回来。
 - 开发期现象：插件重载时 context 会先 dispose 再重注册，于是会话里会各留下一条「没有 roster」和「有 roster」的快照（实测 seq 515 → 526）。这是重载造成的，steady state 不会发生；生产环境只在插件升级时出现一次。
 - `BUILD` 升到 `v45-context-roster`。
+
+## v46：每轮结束都通知主控
+
+改前只有一条路径会真的叫醒主控：`task_block`。`task_complete` 走的是 `urgent:false`（只落库进 inbox，主控不主动拉就看不到），`stopRound`（UI 的「停止本轮」、换会话重建）则完全不通知——任务停在 `blocked`，主控毫无感知。
+
+现在把通知收敛到 `finishRound` 这一个收口：
+
+- `finishRound` 完成后调用 `announceRoundEnd`，由它读真实任务，拼一条通知：任务 id + 标题、执行方（bot 名与 id）、会话 id、结果（`轮次结束，等待验收` / `轮次失败`）、`说明`（交回摘要、受阻原因、停止原因）、当前状态，以及下一步动作（验收 → `task_update status=done`；打回 → `task_dispatch`）。
+- 通知固定 `urgent: true`，即进入主控的对话；仍尊重任务级 `notify` 覆盖（`silent` 时只落库）。
+- `silent: true` 用于内部收尾：换会话重建（`newTaskSession`）、派发投递失败（错误已同步返回给调用者）。这两处若也通知，只会制造噪音。
+- 自通知防护：如果任务会话就是主控自己的会话（主控亲自执行、`agentRequired` 关掉），跳过投递，避免把通知打进正在产生它的那一轮。
+- `task_complete` / `task_block` 里原来的额外通知删掉了，避免同一轮结束收到两条；`watchRound` 超时也走 `finishRound`，因此同样只发一条。
+- `drainQueue` 里排队派发失败时单独通知主控（那时没有调用者在等返回值，不通知就会静默卡住）。
+- 主控人格补了处置流程：收到「任务板通知」→ `task_get` 读真实结果 → 验收或打回 → 只在需要用户知道时用两三句话汇报，不整段转述执行者报告；没有通知时不要空转轮询。
+- 测试：`tests/notify.test.mjs` 5 条（完成/失败文案与下一步、silent 不打扰、主控自执行不通知自己、任务级 `notify=silent` 只落库）。
+- `BUILD` 升到 `v46-round-notices`。
